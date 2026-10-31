@@ -26,6 +26,7 @@
 #include <mach/mig_errors.h>
 #include <bsm/libbsm.h>
 #include <dispatch/private.h>
+#include <cstddef>
 #include <cstring>
 #include <stdexcept>
 
@@ -275,7 +276,7 @@ bool IOSurfaceRoot::handleMessage(mach_msg_header_t *header, mach_msg_header_t *
     if (header->msgh_id == MACH_NOTIFY_NO_SENDERS && m_exports.count(header->msgh_local_port)) {
         mach_port_status_t status{};
         mach_msg_type_number_t count = MACH_PORT_RECEIVE_STATUS_COUNT;
-        if (header->msgh_size == sizeof(mach_no_senders_notification_t) &&
+        if (header->msgh_size == offsetof(mach_no_senders_notification_t, trailer) &&
             !(header->msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
             mach_port_get_attributes(mach_task_self(), header->msgh_local_port, MACH_PORT_RECEIVE_STATUS,
                 (mach_port_info_t)&status, &count) == KERN_SUCCESS && !status.mps_srights)
