@@ -18,26 +18,26 @@
 */
 #ifndef IOKITD_IOSURFACE_H
 #define IOKITD_IOSURFACE_H
-#include "IOObject.h"
-#include <IOSurface/IOSurfacePriv.h>
-#import <Foundation/NSDictionary.h>
+#include <IOSurface/IOSurfaceDarlingLayout.h>
+#include <mach/mach.h>
+#include <Foundation/NSDictionary.h>
 
-class IOSurface : public IOObject
-{
+/* CPU storage only. GPU import is a separate backend requirement. */
+class IOSurface {
 public:
-	IOSurface(IOSurfaceID myId, NSDictionary* properies);
-	~IOSurface();
-	const char* className() const override;
-	bool isGlobal() const { return m_global; }
-
-	void incrementUseCount();
-	void decrementUseCount();
-	void lock();
-	void unlock();
+    explicit IOSurface(NSDictionary *properties);
+    ~IOSurface();
+    IOSurface(const IOSurface&) = delete;
+    IOSurface& operator=(const IOSurface&) = delete;
+    const DarlingSurfaceLayout& layout() const { return m_layout; }
+    mach_vm_address_t address() const { return m_address; }
+    mach_vm_size_t mappedSize() const { return m_mappedSize; }
+    uint32_t seed = 0;
+    uint32_t exports = 0;
+    uint64_t manualUses = 0;
 private:
-	IOSurfaceID m_id;
-	bool m_global = false;
-	int m_useCount = 0;
+    DarlingSurfaceLayout m_layout{};
+    mach_vm_address_t m_address = 0;
+    mach_vm_size_t m_mappedSize = 0;
 };
-
 #endif

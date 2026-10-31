@@ -19,80 +19,55 @@
 
 #ifndef IOKITD_IOSURFACEROOT_H
 #define IOKITD_IOSURFACEROOT_H
-
 #include "IOUserClient.h"
-#include <IOSurface/IOSurfacePriv.h>
 #include "ServiceRegistry.h"
+#include <IOSurface/IOSurfaceDarlingIPC.h>
 #include <unordered_map>
-#include <sys/types.h>
-#include <stdint.h>
+#include <memory>
 #include <dispatch/dispatch.h>
-
-// Try to get the right (generic) type definitions.
-// In particular, we really want EGLNativeDisplayType to be void *,
-// not int as it is if __APPLE__ is defined.
-#undef APPLE
-#undef __APPLE__
-
-#define __unix__
-#define EGL_NO_X11
-
-#include <EGL/egl.h>
-
-#define APPLE
-#define __APPLE__
-
 class IOSurface;
-
-class IOSurfaceRoot : public IOUserClient
-{
-private:
-	IOSurfaceRoot();
-	~IOSurfaceRoot();
+class IOSurfaceRoot : public IOUserClient {
 public:
-	const char* className() const override;
-	NSDictionary* matchingDictionary() override;
-	IOExternalMethod *getExternalMethodForIndex(UInt32 index) override;
-	static IOSurfaceRoot* instance();
-	static void registerSelf(ServiceRegistry* targetServiceRegistry);
+    const char* className() const override;
+    NSDictionary* matchingDictionary() override;
+    IOExternalMethod *getExternalMethodForIndex(UInt32 index) override;
+    static IOSurfaceRoot* instance();
+    static void registerSelf(ServiceRegistry* registry);
+    bool handleMessage(mach_msg_header_t *request, mach_msg_header_t *reply, const audit_token_t& audit);
 private:
-	IOReturn createSurface(const void* inputData, void* outputData, IOByteCount inputCount, IOByteCount* outputCount);
-	IOReturn releaseSurface(IOSurfaceID surfaceID);
-	IOReturn lockSurface(const _IOSurfaceLockUnlock* inputData, void* outputData, IOByteCount inputCount, IOByteCount* outputCount);
-	IOReturn unlockSurface(const _IOSurfaceLockUnlock* inputData, void* outputData, IOByteCount inputCount, IOByteCount* outputCount);
-	IOReturn lookupById(IOSurfaceID surfaceID, void* outputData, IOByteCount* outputCount);
-	IOReturn incrementSurfaceUseCount(IOSurfaceID surfaceID);
-	IOReturn decrementSurfaceUseCount(IOSurfaceID surfaceID);
-	IOReturn lookupByMachPort(mach_port_t remoteMachPort, void* outputData, IOByteCount* outputCount);
-	IOReturn getSurfaceMachPort(IOSurfaceID surfaceID, mach_port_t* remoteMachPort);
-
-	void registerCaller();
-	void callerDied(pid_t pid);
-protected:
-	void surfaceDestroyed(IOSurfaceID myId);
-	EGLDisplay display() { return m_display; }
-	bool hasDisplay() const { return m_display != EGL_NO_DISPLAY; }
-private:
-	struct SurfaceMapping
-	{
-		uint64_t memoryAddress;
-		// incrementSurfaceUseCount / decrementSurfaceUseCount
-		uint32_t useCount = 0;
-	};
-	struct RegisteredProcess
-	{
-		pid_t pid;
-		std::unordered_map<IOSurfaceID, SurfaceMapping> surfaces;
-		dispatch_source_t procSource;
-	};
-
-	std::unordered_map<pid_t, RegisteredProcess> m_processes;
-	std::unordered_map<IOSurfaceID, IOSurface*> m_surfaces;
-	IOSurfaceID m_nextSurfaceID = 1;
-
-	EGLDisplay m_display;
-
-	friend class IOSurface;
+    struct Mapping {
+        std::shared_ptr<IOSurface> surface;
+        mach_vm_address_t address = 0;
+        uint32_t references = 0, uses = 0;
+        uint32_t readLocks = 0, writeLocks = 0;
+    };
+    struct Process {
+        mach_port_t task = MACH_PORT_NULL;
+        uint64_t generation = 0;
+        dispatch_source_t source = nullptr;
+        std::unordered_map<uint32_t, Mapping> mappings;
+    };
+    struct Export {
+        std::shared_ptr<IOSurface> surface;
+        dispatch_source_t source;
+        mach_port_t task;
+        uint32_t surfaceID;
+        uint64_t generation;
+        bool publicExport;
+    };
+    kern_return_t execute(const DarlingSurfaceRequest&, DarlingSurfaceReply&, const audit_token_t&,
+        bool& acquiredMapping);
+    kern_return_t mapSurface(Process&, uint32_t id, std::shared_ptr<IOSurface>, DarlingSurfaceReply&);
+    void fillReply(const Mapping&, uint32_t id, DarlingSurfaceReply&);
+    kern_return_t releaseMapping(Process&, uint32_t id);
+    void processDied(mach_port_t task);
+    kern_return_t exportSurface(const std::shared_ptr<IOSurface>&, mach_port_t *right,
+        mach_port_t task, uint32_t id, uint64_t generation, bool publicExport);
+    void exportDied(mach_port_t port);
+    std::unordered_map<mach_port_t, Process> m_processes;
+    std::unordered_map<uint32_t, std::weak_ptr<IOSurface>> m_surfaces;
+    std::unordered_map<mach_port_t, Export> m_exports;
+    uint32_t m_nextSurfaceID = 1;
+    uint64_t m_nextProcessGeneration = 1;
 };
-
 #endif

@@ -19,6 +19,8 @@
 
 #include "IOObject.h"
 #include "iokitd.h"
+#include <IOSurface/IOSurfaceDarlingIPC.h>
+#include <algorithm>
 #include <stdexcept>
 #include <cstring>
 #include <os/log.h>
@@ -50,7 +52,7 @@ IOObject::IOObject()
 		throw std::runtime_error("Failed to create dispatch source");
 
 	dispatch_source_set_event_handler(m_dispatchSource, ^{
-		dispatch_mig_server(m_dispatchSource, is_iokit_subsystem.maxsize, iokit_server);
+		dispatch_mig_server(m_dispatchSource, std::max((size_t)is_iokit_subsystem.maxsize, sizeof(DarlingSurfaceRequest)), iokitAuditDemux);
 	});
 	dispatch_resume(m_dispatchSource);
 

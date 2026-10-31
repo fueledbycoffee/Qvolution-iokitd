@@ -30,6 +30,7 @@ extern mach_port_t g_masterPort, g_deathPort;
 
 // iokitd calls only - not valid for powerd!
 extern pid_t g_iokitCurrentCallerPID;
+boolean_t iokitAuditDemux(mach_msg_header_t *message, mach_msg_header_t *reply);
 
 #endif
 
