@@ -13,6 +13,7 @@ extern "C" {
 
 #import <Foundation/NSString.h>
 #import <Foundation/NSDictionary.h>
+#include <CoreFoundation/CFNumber.h>
 
 uint64_t IORegistryEntry::m_nextId = 0x100000000;
 std::unordered_map<uint64_t, IORegistryEntry*> IORegistryEntry::m_entriesById;
@@ -386,15 +387,8 @@ kern_return_t is_io_registry_entry_get_location_in_plane
     return KERN_NOT_SUPPORTED;
 }
 
-kern_return_t is_io_registry_entry_from_path
-(
-	mach_port_t master_port,
-	io_string_t path,
-	mach_port_t *registry_entry
-)
+static IOReturn lookupPath(const char* path, IORegistryEntry** entry)
 {
-	*registry_entry = 0;
-
 	std::vector<std::string> components;
     std::istringstream iss(path);
 
@@ -433,8 +427,104 @@ kern_return_t is_io_registry_entry_from_path
 		current = next;
 	}
 
-	*registry_entry = current->port();
+	*entry = current;
 
+	return kIOReturnSuccess;
+}
+
+kern_return_t is_io_registry_entry_from_path
+(
+	mach_port_t master_port,
+	io_string_t path,
+	mach_port_t *registry_entry
+)
+{
+	*registry_entry = 0;
+
+	IORegistryEntry* entry;
+	IOReturn ret = lookupPath(path, &entry);
+	if (ret != kIOReturnSuccess)
+		return ret;
+
+	*registry_entry = entry->port();
+
+	return kIOReturnSuccess;
+}
+
+kern_return_t is_io_registry_entry_from_path_ool
+(
+	mach_port_t master_port,
+	io_string_inband_t path,
+	io_buf_ptr_t path_ool,
+	mach_msg_type_number_t path_oolCnt,
+	kern_return_t *result,
+	mach_port_t *registry_entry
+)
+{
+	*registry_entry = MACH_PORT_NULL;
+
+	// IOKitUser sends paths longer than io_string_inband_t out of line, with
+	// the terminating NUL, and leaves the inband path empty.
+	const char* cpath = nullptr;
+	if (path[0])
+	{
+		if (memchr(path, 0, sizeof(io_string_inband_t)))
+			cpath = path;
+	}
+	else if (path_ool && path_oolCnt && !path_ool[path_oolCnt - 1])
+		cpath = path_ool;
+
+	IORegistryEntry* entry;
+	*result = cpath ? lookupPath(cpath, &entry) : kIOReturnBadArgument;
+	if (*result == kIOReturnSuccess)
+		*registry_entry = entry->port();
+
+	// The out-of-line buffer was mapped into this task for this request.
+	if (path_ool)
+		vm_deallocate(mach_task_self(), (vm_address_t) path_ool, path_oolCnt);
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t is_io_registry_entry_get_path_ool
+(
+	mach_port_t registry_entry,
+	io_name_t plane,
+	io_string_inband_t path,
+	io_buf_ptr_t *path_ool,
+	mach_msg_type_number_t *path_oolCnt
+)
+{
+	*path_ool = nullptr;
+	*path_oolCnt = 0;
+
+	IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
+	if (!e)
+		return kIOReturnBadArgument;
+
+	// Registry paths here are a few components deep, so the inband buffer
+	// always suffices; an out-of-line reply is not implemented.
+	std::string mypath = e->getPath(plane);
+	if (mypath.size() >= sizeof(io_string_inband_t))
+		return kIOReturnNoSpace;
+
+	strlcpy(path, mypath.c_str(), sizeof(io_string_inband_t));
+
+	return kIOReturnSuccess;
+}
+
+kern_return_t is_io_registry_entry_in_plane
+(
+	mach_port_t registry_entry,
+	io_name_t plane,
+	boolean_t *inPlane
+)
+{
+	IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
+	if (!e)
+		return kIOReturnBadArgument;
+
+	*inPlane = !e->getParents(plane).empty();
 	return kIOReturnSuccess;
 }
 
@@ -513,3 +603,67 @@ kern_return_t is_io_registry_entry_get_property_bin
     return kr;
 }
 
+
+kern_return_t is_io_registry_entry_get_property_bytes
+(
+	mach_port_t registry_entry,
+	io_name_t property_name,
+	io_struct_inband_t data,
+	mach_msg_type_number_t *dataCnt
+)
+{
+	IORegistryEntry* e = dynamic_cast<IORegistryEntry*>(IOObject::lookup(registry_entry));
+	if (!e)
+		return kIOReturnBadArgument;
+
+	CFStringRef key = CFStringCreateWithCString(kCFAllocatorDefault, property_name, kCFStringEncodingUTF8);
+	if (!key)
+		return kIOReturnBadArgument;
+
+	CFTypeRef value = CFDictionaryGetValue((CFDictionaryRef) e->getProperties(), key);
+	CFRelease(key);
+	if (!value)
+		return kIOReturnNoResources;
+
+	const void* bytes;
+	CFIndex length;
+	char string[sizeof(io_struct_inband_t)];
+	int64_t number;
+	CFTypeID type = CFGetTypeID(value);
+
+	if (type == CFDataGetTypeID())
+	{
+		bytes = CFDataGetBytePtr((CFDataRef) value);
+		length = CFDataGetLength((CFDataRef) value);
+	}
+	else if (type == CFStringGetTypeID())
+	{
+		// Only fails when the string and its NUL do not fit the reply
+		if (!CFStringGetCString((CFStringRef) value, string, sizeof(string), kCFStringEncodingUTF8))
+			return kIOReturnIPCError;
+		bytes = string;
+		length = strlen(string) + 1;
+	}
+	else if (type == CFBooleanGetTypeID())
+	{
+		bool yes = CFBooleanGetValue((CFBooleanRef) value);
+		bytes = yes ? "Yes" : "No";
+		length = yes ? sizeof("Yes") : sizeof("No");
+	}
+	else if (type == CFNumberGetTypeID() && !CFNumberIsFloatType((CFNumberRef) value))
+	{
+		// The low-order bytes come first on a little-endian guest
+		CFNumberGetValue((CFNumberRef) value, kCFNumberSInt64Type, &number);
+		bytes = &number;
+		length = CFNumberGetByteSize((CFNumberRef) value);
+	}
+	else
+		return kIOReturnBadArgument;
+
+	if (*dataCnt < length)
+		return kIOReturnIPCError;
+
+	*dataCnt = length;
+	memcpy(data, bytes, length);
+	return kIOReturnSuccess;
+}
